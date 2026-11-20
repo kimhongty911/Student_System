@@ -46,14 +46,70 @@ def _request(method: str, path: str, **kwargs):
 
 
 # ---------------------------------------------------------------- session
+# The login token is also saved in a browser cookie so a page refresh keeps the
+# user signed in (st.session_state alone is wiped on a hard refresh).
+COOKIE_NAME = "attn_token"
+COOKIE_MAX_AGE = 72 * 3600          # keep in step with TOKEN_TTL_HOURS
+_cookie_ctl = None
+
+
+def init_cookies():
+    """Create the cookie controller for this run. Call once, early in app.py."""
+    global _cookie_ctl
+    try:
+        from streamlit_cookies_controller import CookieController
+        _cookie_ctl = CookieController()
+    except Exception:
+        _cookie_ctl = None
+    return _cookie_ctl
+
+
+def _save_token_cookie(token: str):
+    if _cookie_ctl is not None:
+        try:
+            _cookie_ctl.set(COOKIE_NAME, token, max_age=COOKIE_MAX_AGE, same_site="strict")
+        except Exception:
+            pass
+
+
+def _clear_token_cookie():
+    if _cookie_ctl is not None:
+        try:
+            _cookie_ctl.remove(COOKIE_NAME)
+        except Exception:
+            pass
+
+
+def restore_session():
+    """Rebuild the session from the saved cookie after a fresh page load / refresh."""
+    if st.session_state.get("user"):
+        return
+    try:
+        token = st.context.cookies.get(COOKIE_NAME)
+    except Exception:
+        token = None
+    if not token:
+        return
+    st.session_state["token"] = token
+    try:
+        st.session_state["user"] = _request("GET", "/api/auth/me").json()
+    except AuthExpired:
+        st.session_state.pop("token", None)       # token no longer valid -> forget it
+        _clear_token_cookie()
+    except APIError:
+        st.session_state.pop("token", None)       # backend down -> keep cookie, retry next load
+
+
 def start_session(response: dict):
     st.session_state["token"] = response["token"]
     st.session_state["user"] = response["user"]
+    _save_token_cookie(response["token"])
 
 
 def clear_session():
     st.session_state.pop("token", None)
     st.session_state.pop("user", None)
+    _clear_token_cookie()
 
 
 def health():
